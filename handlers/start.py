@@ -5,7 +5,7 @@ from database.models import User, Gender
 from database import repo
 from utils.texts import Texts
 from utils.helpers import get_admin_status
-from keyboards.reply import main_menu_kb, gender_kb
+from keyboards.reply import main_menu_kb, gender_kb, chat_kb
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from handlers.relay import RelayStates
@@ -83,19 +83,9 @@ async def cmd_start(
 
         if active_session:
             # User is in active chat - preserve chat keyboard
-            chat_kb = types.ReplyKeyboardMarkup(
-                keyboard=[
-                    [
-                        types.KeyboardButton(text=Texts.STOP_CHAT),
-                        types.KeyboardButton(text=Texts.BLOCK_USER),
-                    ],
-                    [types.KeyboardButton(text=Texts.SEND_PROFILE)],
-                ],
-                resize_keyboard=True,
-            )
             await message.answer(
                 "💬 You are currently in a chat. Use the buttons below.",
-                reply_markup=chat_kb,
+                reply_markup=chat_kb(),
                 parse_mode="HTML",
             )
         else:
