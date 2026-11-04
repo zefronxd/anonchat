@@ -82,12 +82,13 @@ async def main():
     dp.update.middleware(UserRegistrationMiddleware())
 
     # Register Routers (order matters!)
-    dp.include_router(referral.router)  # High priority to catch menu clicks in any state
-    dp.include_router(admin.router)     # Admin high priority
+    dp.include_router(referral.router)    # High priority to catch menu clicks in any state
+    dp.include_router(admin.router)       # Admin high priority
+    dp.include_router(match.router)       # Random-chat buttons: must come BEFORE relay (its FSM-state handler would swallow them)
     dp.include_router(start.router)
     dp.include_router(profile.router)
     dp.include_router(relay.router)
-    dp.include_router(match.router)     # Must stay LAST (has the catch-all relay handler)
+    dp.include_router(match.chat_router)  # Must stay LAST (catch-all that relays chat messages)
 
     # Keep-alive web server + self-ping (only on Render Web Service)
     web_runner = await start_web_server()
