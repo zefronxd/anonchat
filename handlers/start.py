@@ -5,7 +5,7 @@ from database.models import User, Gender
 from database import repo
 from utils.texts import Texts
 from utils.helpers import get_admin_status
-from keyboards.reply import main_menu_kb, gender_kb, chat_kb
+from keyboards.reply import main_menu_kb, gender_kb, chat_kb, link_chat_kb
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from handlers.relay import RelayStates
@@ -54,18 +54,12 @@ async def cmd_start(
                 # ObjectId is stored as a string in FSM (memory storage / JSON-safe)
                 await state.update_data(target_id=str(target.id))
 
-                # Add cancel button
-                cancel_kb = types.ReplyKeyboardMarkup(
-                    keyboard=[[types.KeyboardButton(text="Cancel ❌")]],
-                    resize_keyboard=True,
-                    one_time_keyboard=True,
-                )
-
                 await message.answer(
                     f"✍️ Sending an anonymous message to <b>{target_name}</b>...\n"
-                    f"Write whatever you want (text, photo, voice, etc.):",
+                    f"Write whatever you want (text, photo, voice, etc.).\n"
+                    f"Replies will arrive here as normal messages.",
                     parse_mode="HTML",
-                    reply_markup=cancel_kb,
+                    reply_markup=link_chat_kb(),
                 )
                 await state.set_state(RelayStates.relay_flow)
                 return
