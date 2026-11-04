@@ -1,6 +1,8 @@
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from utils.texts import Texts
 
+EXIT_LINK_CHAT = "Exit Chat 🚪"
+
 def main_menu_kb(is_admin=False):
     kb = [
         [KeyboardButton(text=Texts.MY_LINK), KeyboardButton(text=Texts.REFERRAL_MENU)],
@@ -41,5 +43,13 @@ def searching_kb():
             [KeyboardButton(text=Texts.CANCEL_SEARCH), KeyboardButton(text=Texts.STOP_SEARCH)],
             [KeyboardButton(text=Texts.NEXT_CHAT)],
         ],
+        resize_keyboard=True
+    )
+
+
+def link_chat_kb():
+    """Shown while chatting through an anonymous link."""
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=EXIT_LINK_CHAT)]],
         resize_keyboard=True
     )
