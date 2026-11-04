@@ -20,16 +20,16 @@ async def view_referrals(
     # Count referrals (Strict: only confirmed)
     referral_count = await repo.count_confirmed_referrals(db, db_user.id)
 
-    # Calculate rewards: 30 referrals = 1 hour bonus
-    # Determine if eligible for reward
+    # Determine if eligible for reward (30 referrals)
     has_reward = referral_count >= 30
 
     bot_info = await bot.get_me()
 
-    if not db_user.link_token:
-        await repo.update_user(db, db_user, link_token=repo.new_link_token())
+    # Separate token for referrals (different from the anonymous-message link)
+    if not db_user.ref_token:
+        await repo.update_user(db, db_user, ref_token=repo.new_link_token())
 
-    referral_link = f"https://t.me/{bot_info.username}?start={db_user.link_token}"
+    referral_link = f"https://t.me/{bot_info.username}?start=ref_{db_user.ref_token}"
 
     # Format text
     text = Texts.REFERRAL_INFO.format(link=referral_link, count=referral_count)
@@ -37,7 +37,7 @@ async def view_referrals(
     # Build keyboard
     buttons = []
     # Share button with proper URL encoding
-    share_text = quote("Send me an anonymous message! 👇")
+    share_text = quote("Join this anonymous chat bot! 👇")
     share_url = f"https://t.me/share/url?url={quote(referral_link)}&text={share_text}"
     buttons.append([InlineKeyboardButton(text="Share 📤", url=share_url)])
 
