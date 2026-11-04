@@ -18,6 +18,9 @@ async def init_db() -> None:
     await db.users.create_index(
         "display_id", unique=True, partialFilterExpression={"display_id": {"$type": "string"}}
     )
+    await db.users.create_index(
+        "ref_token", unique=True, partialFilterExpression={"ref_token": {"$type": "string"}}
+    )
     await db.users.create_index("username")
     await db.users.create_index([("referred_by_id", ASCENDING), ("referral_confirmed", ASCENDING)])
 
