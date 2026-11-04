@@ -50,6 +50,7 @@ class User:
     referral_confirmed: bool = False
     referral_bonus_until: Optional[datetime] = None
     created_at: Optional[datetime] = None
+    match_pref: Optional[str] = None  # last random-chat preference (used by 'Next')
 
     @classmethod
     def from_doc(cls, doc: Optional[dict]) -> Optional["User"]:
