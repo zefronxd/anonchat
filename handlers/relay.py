@@ -3,20 +3,29 @@ from pymongo.asynchronous.database import AsyncDatabase
 from database.models import User
 from database import repo
 from utils.texts import Texts
+from utils.helpers import get_admin_status
+from keyboards.reply import main_menu_kb, link_chat_kb, EXIT_LINK_CHAT
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.fsm.storage.base import StorageKey
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from urllib.parse import quote
 import hashlib
 import time
 
 
 class RelayStates(StatesGroup):
-    relay_flow = State()
-    reply_flow = State()
+    relay_flow = State()   # visitor who opened someone's anonymous link
+    reply_flow = State()   # link owner who pressed "Reply"
 
 
 router = Router()
+
+INTRO_TEXT = (
+    "✅ Sent anonymously!\n"
+    "You can keep chatting here — just send messages, replies will arrive as normal messages.\n"
+    "Press <b>Exit Chat 🚪</b> when you want to leave."
+)
 
 
 def get_relay_kb(sender_internal_id):
@@ -32,6 +41,20 @@ def get_relay_kb(sender_internal_id):
             ]
         ]
     )
+
+
+async def _in_mutual_chat(bot: Bot, storage, target_tg_id: int, my_id) -> bool:
+    """True if the other person is *currently* chatting with me in link-chat mode.
+    In that case messages are delivered as plain, normal messages (no header, no buttons)."""
+    try:
+        key = StorageKey(bot_id=bot.id, chat_id=target_tg_id, user_id=target_tg_id)
+        st = await storage.get_state(key)
+        if st not in (RelayStates.relay_flow.state, RelayStates.reply_flow.state):
+            return False
+        data = await storage.get_data(key)
+        return data.get("target_id") == str(my_id)
+    except Exception:
+        return False
 
 
 @router.message(F.text == Texts.MY_LINK)
@@ -54,134 +77,125 @@ async def get_my_link(
     await message.answer(f"🔗 {Texts.YOUR_LINK.format(link=link)}", reply_markup=kb)
 
 
+# NOTE: the exit handler must be registered BEFORE the state handler below,
+# otherwise the "Exit Chat" button text would be relayed as a message.
+@router.message(F.text.in_({"Cancel ❌", EXIT_LINK_CHAT}))
+async def exit_link_chat(message: types.Message, state: FSMContext, db: AsyncDatabase):
+    current_state = await state.get_state()
+    if current_state not in (RelayStates.relay_flow.state, RelayStates.reply_flow.state):
+        return
+
+    await state.clear()
+    is_admin = await get_admin_status(message.from_user.id, db)
+    await message.answer(
+        "✅ You left the chat.",
+        reply_markup=main_menu_kb(is_admin=is_admin),
+        parse_mode="HTML",
+    )
+
+
 @router.message(RelayStates.relay_flow)
-async def process_relay(
+@router.message(RelayStates.reply_flow)
+async def process_link_message(
     message: types.Message, db: AsyncDatabase, state: FSMContext, bot: Bot, db_user: User
 ):
     data = await state.get_data()
+    current_state = await state.get_state()
     target_oid = repo.parse_oid(data.get("target_id"))
     target = await repo.get_user(db, target_oid) if target_oid else None
 
     if not target:
-        await message.answer("❌ An error occurred. Recipient not found.")
         await state.clear()
+        is_admin = await get_admin_status(message.from_user.id, db)
+        await message.answer(
+            "❌ Recipient not found.", reply_markup=main_menu_kb(is_admin=is_admin)
+        )
         return
 
-    # Generate Anonymous ID (changes every 3 days)
-    period_salt = int(time.time() / (86400 * 3))  # 3 days window
-    # Simple consistent hash
-    raw_id = f"{db_user.id}:{target.id}:{period_salt}"
-    hash_obj = hashlib.md5(raw_id.encode())
-    # Take last 6 digits of the int value
-    anon_id = int(hash_obj.hexdigest(), 16) % 1000000
+    is_visitor = current_state == RelayStates.relay_flow.state
+    mutual = await _in_mutual_chat(bot, state.storage, target.tg_id, db_user.id)
 
-    # Relay message
+    delivered = True
     try:
-        await bot.send_message(
-            target.tg_id,
-            f"🔔 <b>New anonymous message!</b>\n👤 Sender: <code>#{anon_id}</code>",
-            parse_mode="HTML",
-        )
-        await bot.copy_message(
-            chat_id=target.tg_id,
-            from_chat_id=message.chat.id,
-            message_id=message.message_id,
-            reply_markup=get_relay_kb(db_user.id),
-        )
-        await message.answer("✅ Your message was sent anonymously!")
+        if mutual:
+            # Both sides are in the chat -> deliver as a normal message
+            await bot.copy_message(
+                chat_id=target.tg_id,
+                from_chat_id=message.chat.id,
+                message_id=message.message_id,
+            )
+        else:
+            if is_visitor:
+                # Anonymous ID (changes every 3 days)
+                period_salt = int(time.time() / (86400 * 3))
+                raw_id = f"{db_user.id}:{target.id}:{period_salt}"
+                anon_id = int(hashlib.md5(raw_id.encode()).hexdigest(), 16) % 1000000
+                header = f"🔔 <b>New anonymous message!</b>\n👤 Sender: <code>#{anon_id}</code>"
+            else:
+                header = "💬 <b>New reply from the anonymous user:</b>"
+
+            await bot.send_message(target.tg_id, header, parse_mode="HTML")
+            await bot.copy_message(
+                chat_id=target.tg_id,
+                from_chat_id=message.chat.id,
+                message_id=message.message_id,
+                reply_markup=get_relay_kb(db_user.id),
+            )
     except Exception:
+        delivered = False
         await message.answer(
             "⚠️ Message could not be sent. The recipient may have blocked the bot."
         )
 
-    # Log message
-    await repo.log_message(
-        db,
-        sender_id=db_user.id,
-        receiver_id=target.id,
-        content_type=message.content_type,
-        content=message.text or message.caption or f"[{message.content_type}]",
-        context="link",
-    )
-
-    await state.clear()
+    if delivered:
+        await repo.log_message(
+            db,
+            sender_id=db_user.id,
+            receiver_id=target.id,
+            content_type=message.content_type,
+            content=message.text or message.caption or f"[{message.content_type}]",
+            context="link" if is_visitor else "reply",
+        )
+        # Show the short intro only once; after that it behaves like a normal chat
+        if not data.get("intro_shown"):
+            await state.update_data(intro_shown=True)
+            await message.answer(INTRO_TEXT, reply_markup=link_chat_kb(), parse_mode="HTML")
 
 
 @router.callback_query(F.data.startswith("reply_"))
-async def start_reply(callback: types.CallbackQuery, state: FSMContext):
+async def start_reply(
+    callback: types.CallbackQuery, state: FSMContext, db: AsyncDatabase, db_user: User
+):
     target_id = callback.data.split("_", 1)[1]
     if not repo.parse_oid(target_id):
         await callback.answer("❌ Invalid recipient.", show_alert=True)
         return
-    await state.update_data(target_id=target_id)
+
+    if await repo.get_active_session(db, db_user.id):
+        await callback.answer(
+            "⚠️ Finish your random chat first (End Chat 🏁).", show_alert=True
+        )
+        return
+
     await state.set_state(RelayStates.reply_flow)
-    await callback.message.answer(f"✍️ {Texts.REPLY_PROMPT}")
+    await state.set_data({"target_id": target_id, "intro_shown": True})
+    await callback.message.answer(
+        "✍️ You are now chatting anonymously.\n"
+        "Just send your messages here. Press <b>Exit Chat 🚪</b> to leave.",
+        reply_markup=link_chat_kb(),
+        parse_mode="HTML",
+    )
     await callback.answer()
 
 
 @router.callback_query(F.data == "close_relay")
-async def close_relay_msg(callback: types.CallbackQuery, state: FSMContext):
+async def close_relay_msg(
+    callback: types.CallbackQuery, state: FSMContext, db: AsyncDatabase
+):
     await state.clear()
     await callback.message.edit_reply_markup(reply_markup=None)
-    await callback.message.answer("❌ Chat closed.")
-    await callback.answer()
-
-
-@router.message(RelayStates.reply_flow)
-async def process_reply(
-    message: types.Message, db: AsyncDatabase, state: FSMContext, bot: Bot, db_user: User
-):
-    data = await state.get_data()
-    target_oid = repo.parse_oid(data.get("target_id"))
-    target = await repo.get_user(db, target_oid) if target_oid else None
-
-    if not target:
-        await message.answer("❌ Sorry, the recipient is no longer available.")
-        await state.clear()
-        return
-
-    try:
-        await bot.send_message(
-            target.tg_id,
-            "💬 <b>New reply from the anonymous user:</b>",
-            parse_mode="HTML",
-        )
-        await bot.copy_message(
-            chat_id=target.tg_id,
-            from_chat_id=message.chat.id,
-            message_id=message.message_id,
-            reply_markup=get_relay_kb(db_user.id),  # Link owners can keep replying
-        )
-        await message.answer("✅ Your reply was sent successfully.")
-    except Exception:
-        await message.answer("⚠️ Reply could not be sent.")
-
-    await repo.log_message(
-        db,
-        sender_id=db_user.id,
-        receiver_id=target.id,
-        content_type=message.content_type,
-        content=message.text or message.caption or f"[{message.content_type}]",
-        context="reply",
+    is_admin = await get_admin_status(callback.from_user.id, db)
+    await callback.message.answer(
+        "❌ Chat closed.", reply_markup=main_menu_kb(is_admin=is_admin)
     )
-    await state.clear()
-
-
-@router.message(F.text == "Cancel ❌")
-async def cancel_relay(message: types.Message, state: FSMContext, db: AsyncDatabase):
-    """Handle cancel button during relay flow"""
-    current_state = await state.get_state()
-
-    # Only handle if in relay or reply flow
-    if current_state in [RelayStates.relay_flow, RelayStates.reply_flow]:
-        await state.clear()
-
-        from keyboards.reply import main_menu_kb
-        from utils.helpers import get_admin_status
-
-        is_admin = await get_admin_status(message.from_user.id, db)
-        await message.answer(
-            "❌ Message sending cancelled.",
-            reply_markup=main_menu_kb(is_admin=is_admin),
-            parse_mode="HTML",
-        )
+    await callback.answer()
