@@ -1,4 +1,4 @@
-from aiogram import Router, types, F
+from aiogram import Router, types, F, Bot
 from aiogram.filters import CommandStart, Command
 from pymongo.asynchronous.database import AsyncDatabase
 from database.models import User, Gender
@@ -23,46 +23,54 @@ class Registration(StatesGroup):
 async def cmd_start(
     message: types.Message, db: AsyncDatabase, state: FSMContext, db_user: User
 ):
-    # Handle deep-linking (t.me/bot?start=token)
     args = message.text.split()
     if len(args) > 1:
         token = args[1]
-        # Check if token belongs to someone
-        target = await repo.get_user_by_link_token(db, token)
 
-        if target:
-            if target.tg_id == message.from_user.id:
-                await message.answer(
-                    "⚠️ You can't send an anonymous message to yourself! 😅",
-                    parse_mode="HTML",
+        # ───────── REFERRAL link: t.me/bot?start=ref_<token> ─────────
+        if token.startswith("ref_"):
+            referrer = await repo.get_user_by_ref_token(db, token[4:])
+            # Only count brand-new users (those who haven't finished registration yet)
+            if (
+                referrer
+                and referrer.id != db_user.id
+                and not db_user.referred_by_id
+                and db_user.gender == Gender.UNKNOWN
+            ):
+                await repo.update_user(
+                    db, db_user, referred_by_id=referrer.id, referral_confirmed=False
                 )
-            else:
-                # Referral Tracking
-                # Track if user was never referred before
-                if not db_user.referred_by_id and target.id != db_user.id:
-                    # Also reset referral_confirmed just in case they were registered but NOT confirmed
-                    await repo.update_user(
-                        db, db_user, referred_by_id=target.id, referral_confirmed=False
+                logging.info(
+                    f"Referral tracked: {db_user.tg_id} referred by {referrer.tg_id}"
+                )
+            # ...then continue with the normal welcome / gender flow below
+
+        # ───────── ANONYMOUS MESSAGE link: t.me/bot?start=<token> ─────────
+        else:
+            target = await repo.get_user_by_link_token(db, token)
+
+            if target:
+                if target.tg_id == message.from_user.id:
+                    await message.answer(
+                        "⚠️ You can't send an anonymous message to yourself! 😅",
+                        parse_mode="HTML",
                     )
-                    logging.info(
-                        f"Referral tracked: {db_user.tg_id} referred by {target.tg_id}"
+                else:
+                    target_name = html.escape(
+                        target.nickname or target.full_name or "Someone"
                     )
+                    # ObjectId is stored as a string in FSM (memory storage / JSON-safe)
+                    await state.update_data(target_id=str(target.id))
 
-                target_name = html.escape(
-                    target.nickname or target.full_name or "Someone"
-                )
-                # ObjectId is stored as a string in FSM (memory storage / JSON-safe)
-                await state.update_data(target_id=str(target.id))
-
-                await message.answer(
-                    f"✍️ Sending an anonymous message to <b>{target_name}</b>...\n"
-                    f"Write whatever you want (text, photo, voice, etc.).\n"
-                    f"Replies will arrive here as normal messages.",
-                    parse_mode="HTML",
-                    reply_markup=link_chat_kb(),
-                )
-                await state.set_state(RelayStates.relay_flow)
-                return
+                    await message.answer(
+                        f"✍️ Sending an anonymous message to <b>{target_name}</b>...\n"
+                        f"Write whatever you want (text, photo, voice, etc.).\n"
+                        f"Replies will arrive here as normal messages.",
+                        parse_mode="HTML",
+                        reply_markup=link_chat_kb(),
+                    )
+                    await state.set_state(RelayStates.relay_flow)
+                    return
 
     # If they are returning without a link
     if db_user.gender == Gender.UNKNOWN:
@@ -94,7 +102,11 @@ async def cmd_start(
 
 @router.message(Registration.choosing_gender)
 async def process_gender(
-    message: types.Message, db: AsyncDatabase, state: FSMContext, db_user: User
+    message: types.Message,
+    db: AsyncDatabase,
+    state: FSMContext,
+    db_user: User,
+    bot: Bot,
 ):
     if message.text == Texts.GENDER_MALE:
         gender = Gender.MALE
@@ -107,6 +119,21 @@ async def process_gender(
         return
 
     await repo.update_user(db, db_user, gender=gender)
+
+    # Registration finished -> confirm the referral (counts for the referrer now)
+    if db_user.referred_by_id and not db_user.referral_confirmed:
+        await repo.update_user(db, db_user, referral_confirmed=True)
+        try:
+            referrer = await repo.get_user(db, db_user.referred_by_id)
+            if referrer:
+                total = await repo.count_confirmed_referrals(db, referrer.id)
+                await bot.send_message(
+                    referrer.tg_id,
+                    f"🎉 Someone joined using your referral link!\n👤 Total referrals: <b>{total}</b>",
+                    parse_mode="HTML",
+                )
+        except Exception as e:
+            logging.warning(f"Could not notify referrer: {e}")
 
     await state.clear()
     is_admin = await get_admin_status(message.from_user.id, db)
