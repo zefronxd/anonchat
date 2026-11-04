@@ -39,6 +39,10 @@ async def get_user_by_link_token(db: AsyncDatabase, token: str) -> Optional[User
     return User.from_doc(await db.users.find_one({"link_token": token}))
 
 
+async def get_user_by_ref_token(db: AsyncDatabase, token: str) -> Optional[User]:
+    return User.from_doc(await db.users.find_one({"ref_token": token}))
+
+
 async def get_user_by_username(db: AsyncDatabase, username: str) -> Optional[User]:
     return User.from_doc(await db.users.find_one({"username": username}))
 
